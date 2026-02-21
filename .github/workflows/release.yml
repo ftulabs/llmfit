@@ -1,9 +1,8 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -73,7 +72,7 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ github.event.release.tag_name }}"
           ASSET="${BINARY}-${TAG}-${{ matrix.target }}"
           STAGING="/tmp/${ASSET}"
           mkdir -p "${STAGING}"
@@ -97,16 +96,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: artifacts/**/*.tar.gz
+      - name: Upload assets to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for f in artifacts/**/*.tar.gz; do
+            echo "Uploading ${f}..."
+            gh release upload "${{ github.event.release.tag_name }}" "${f}" --clobber
+          done
 
   publish-crate:
     needs: release
@@ -135,7 +140,7 @@ jobs:
 
       - name: Download release assets and update formula
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           VERSION="${TAG#v}"
 
@@ -196,5 +201,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/llmfit.rb
-          git commit -m "Update llmfit to ${GITHUB_REF_NAME}"
+          git commit -m "Update llmfit to ${{ github.event.release.tag_name }}"
           git push
