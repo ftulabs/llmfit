@@ -10,6 +10,8 @@ A terminal tool that right-sizes LLM models to your system's RAM, CPU, and GPU. 
 
 Ships with an interactive TUI (default) and a classic CLI mode. Supports multi-GPU setups, MoE architectures, dynamic quantization selection, and speed estimation.
 
+> **Sister project:** Check out [kubeclaw](https://github.com/AlexsJones/kubeclaw/) for managing agents in Kubernetes.
+
 ### Quick install (macOS / Linux)
 
 ```sh
