@@ -214,7 +214,7 @@ pub fn analyze_cluster(
 }
 
 /// Post-process a ModelFit to account for cluster distribution.
-fn adjust_for_cluster(fit: &mut ModelFit, config: &ClusterConfig) {
+pub fn adjust_for_cluster(fit: &mut ModelFit, config: &ClusterConfig) {
     let total_gpu_count = config.total_gpu_count();
     if total_gpu_count == 0 {
         return;

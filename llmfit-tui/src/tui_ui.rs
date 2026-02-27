@@ -46,9 +46,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     draw_status_bar(frame, app, outer[3], &tc);
 
-    // Draw provider popup on top if active
+    // Draw popups on top if active
     if app.input_mode == InputMode::ProviderPopup {
         draw_provider_popup(frame, app, &tc);
+    }
+    if app.input_mode == InputMode::ClusterPopup || app.input_mode == InputMode::ClusterAdd {
+        draw_cluster_popup(frame, app, &tc);
     }
 }
 
@@ -144,11 +147,30 @@ fn draw_system_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         Span::styled(mlx_info, Style::default().fg(mlx_color)),
     ]);
 
+    let title = if app.cluster_active {
+        " llmfit [CLUSTER] "
+    } else {
+        " llmfit "
+    };
+    let title_color = if app.cluster_active {
+        tc.accent_secondary
+    } else {
+        tc.title
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(tc.border))
-        .title(" llmfit ")
-        .title_style(Style::default().fg(tc.title).add_modifier(Modifier::BOLD));
+        .border_style(Style::default().fg(if app.cluster_active {
+            tc.accent_secondary
+        } else {
+            tc.border
+        }))
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(title_color)
+                .add_modifier(Modifier::BOLD),
+        );
 
     let paragraph = Paragraph::new(text).block(block);
     frame.render_widget(paragraph, area);
@@ -169,7 +191,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
     // Search box
     let search_style = match app.input_mode {
         InputMode::Search => Style::default().fg(tc.accent_secondary),
-        InputMode::Normal | InputMode::ProviderPopup => Style::default().fg(tc.muted),
+        _ => Style::default().fg(tc.muted),
     };
 
     let search_text = if app.search_query.is_empty() && app.input_mode == InputMode::Normal {
@@ -906,6 +928,298 @@ fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
     frame.render_widget(paragraph, popup_area);
 }
 
+fn draw_cluster_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
+    let area = frame.area();
+    let popup_width = 56.min(area.width.saturating_sub(4));
+    let popup_height = 18.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    if app.input_mode == InputMode::ClusterAdd {
+        draw_cluster_add_form(frame, app, popup_area, tc);
+        return;
+    }
+
+    // Browse mode
+    let mode_label = if app.cluster_active {
+        "ACTIVE"
+    } else {
+        "inactive"
+    };
+    let mode_color = if app.cluster_active {
+        tc.good
+    } else {
+        tc.muted
+    };
+
+    let inner_height = popup_height.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Mode line
+    lines.push(Line::from(vec![
+        Span::styled(" Mode: ", Style::default().fg(tc.fg).bold()),
+        Span::styled(mode_label, Style::default().fg(mode_color).bold()),
+        Span::styled(
+            if app.cluster_active {
+                "  (Enter to switch to local)"
+            } else if app.cluster_nodes.is_empty() {
+                "  (add nodes first)"
+            } else {
+                "  (Enter to activate)"
+            },
+            Style::default().fg(tc.muted),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    if app.cluster_nodes.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " No nodes configured. Press 'a' to add.",
+            Style::default().fg(tc.muted),
+        )));
+    } else {
+        // Header
+        lines.push(Line::from(vec![Span::styled(
+            "   #  Name             RAM       VRAM      Cores",
+            Style::default().fg(tc.muted),
+        )]));
+
+        for (i, node) in app.cluster_nodes.iter().enumerate() {
+            let is_selected = i == app.cluster_cursor;
+            let vram_str = node
+                .vram_gb
+                .map(|v| format!("{:.0} GB", v))
+                .unwrap_or_else(|| "-".to_string());
+            let line_text = format!(
+                " {} {}x {:<16} {:<9} {:<9} {}",
+                if is_selected { ">" } else { " " },
+                node.count,
+                node.name,
+                format!("{:.0} GB", node.ram_gb),
+                vram_str,
+                node.cpu_cores,
+            );
+            let style = if is_selected {
+                Style::default().fg(tc.fg).bold().bg(tc.highlight_bg)
+            } else {
+                Style::default().fg(tc.fg)
+            };
+            lines.push(Line::from(Span::styled(line_text, style)));
+        }
+
+        // Totals
+        let total_vram: f64 = app
+            .cluster_nodes
+            .iter()
+            .filter_map(|n| n.vram_gb.map(|v| v * n.count as f64))
+            .sum();
+        let total_ram: f64 = app
+            .cluster_nodes
+            .iter()
+            .map(|n| n.ram_gb * n.count as f64)
+            .sum();
+        let total_gpus: u32 = app
+            .cluster_nodes
+            .iter()
+            .filter(|n| n.vram_gb.is_some())
+            .map(|n| n.count)
+            .sum();
+        let total_nodes: u32 = app.cluster_nodes.iter().map(|n| n.count).sum();
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(
+                " Totals: {} nodes | {:.0} GB RAM | {:.0} GB VRAM | {} GPUs",
+                total_nodes, total_ram, total_vram, total_gpus
+            ),
+            Style::default().fg(tc.accent),
+        )));
+    }
+
+    // Pad to fill
+    while lines.len() < inner_height {
+        lines.push(Line::from(""));
+    }
+
+    // Help line at bottom
+    if lines.len() > 1 {
+        let last = lines.len() - 1;
+        lines[last] = Line::from(Span::styled(
+            " a:add  d:delete  Enter:toggle  Esc:close",
+            Style::default().fg(tc.muted),
+        ));
+    }
+
+    let title = format!(
+        " Cluster ({} nodes) ",
+        app.cluster_nodes.iter().map(|n| n.count).sum::<u32>()
+    );
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if app.cluster_active {
+            tc.accent_secondary
+        } else {
+            tc.border
+        }))
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(tc.accent_secondary)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_cluster_add_form(frame: &mut Frame, app: &App, popup_area: Rect, tc: &ThemeColors) {
+    use crate::tui_app::ClusterField;
+
+    let Some(form) = &app.cluster_form else {
+        return;
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        " Add a node to the cluster:",
+        Style::default().fg(tc.fg).bold(),
+    )));
+    lines.push(Line::from(""));
+
+    for &field in ClusterField::all() {
+        let is_active = field == form.active_field;
+        let label = format!(" {:<6}", field.label());
+        let value = form.field_value(field);
+        let hint = match field {
+            ClusterField::Count => "number of instances",
+            ClusterField::Name => "GPU name or 'cpu'",
+            ClusterField::Ram => "e.g. 128G, 16G",
+            ClusterField::Vram => "e.g. 40G (empty=CPU)",
+            ClusterField::Cores => "optional, default auto",
+        };
+
+        let cursor_char = if is_active { "▎" } else { " " };
+        let value_display = if value.is_empty() && !is_active {
+            hint.to_string()
+        } else {
+            format!("{}{}", value, if is_active { "▏" } else { "" })
+        };
+
+        let label_style = if is_active {
+            Style::default().fg(tc.accent_secondary).bold()
+        } else {
+            Style::default().fg(tc.muted)
+        };
+        let value_style = if is_active {
+            Style::default().fg(tc.fg)
+        } else if value.is_empty() {
+            Style::default().fg(tc.muted)
+        } else {
+            Style::default().fg(tc.fg)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(cursor_char, Style::default().fg(tc.accent_secondary)),
+            Span::styled(label, label_style),
+            Span::styled(" [", Style::default().fg(tc.border)),
+            Span::styled(value_display, value_style),
+            Span::styled("]", Style::default().fg(tc.border)),
+        ]));
+    }
+
+    // Error message
+    if let Some(err) = &form.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" Error: {}", err),
+            Style::default().fg(tc.error),
+        )));
+    }
+
+    // Fill remaining space
+    let inner_height = popup_area.height.saturating_sub(2) as usize;
+    while lines.len() < inner_height {
+        lines.push(Line::from(""));
+    }
+
+    // Help line
+    if lines.len() > 1 {
+        let last = lines.len() - 1;
+        lines[last] = Line::from(Span::styled(
+            " Tab:next  Enter:save  Esc:cancel",
+            Style::default().fg(tc.muted),
+        ));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(tc.accent_secondary))
+        .title(" Add Node ")
+        .title_style(
+            Style::default()
+                .fg(tc.accent_secondary)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn status_keys_and_mode(app: &App) -> (String, &'static str) {
+    match app.input_mode {
+        InputMode::Normal => {
+            let detail_key = if app.show_detail {
+                "Enter:table"
+            } else {
+                "Enter:detail"
+            };
+            let any_provider = app.ollama_available || app.mlx_available;
+            let ollama_keys = if any_provider {
+                let installed_key = if app.installed_first {
+                    "i:all"
+                } else {
+                    "i:installed↑"
+                };
+                format!("  {}  d:pull  r:refresh", installed_key)
+            } else {
+                String::new()
+            };
+            let cluster_hint = if app.cluster_active {
+                "  c:cluster✓"
+            } else {
+                "  c:cluster"
+            };
+            (
+                format!(
+                    " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  t:theme{}  p:providers{}  q:quit",
+                    detail_key, ollama_keys, cluster_hint,
+                ),
+                "NORMAL",
+            )
+        }
+        InputMode::Search => (
+            "  Type to search  Esc:done  Ctrl-U:clear".to_string(),
+            "SEARCH",
+        ),
+        InputMode::ProviderPopup => (
+            "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),
+            "PROVIDERS",
+        ),
+        InputMode::ClusterPopup => (
+            "  a:add  d:delete  Enter:toggle  Esc:close".to_string(),
+            "CLUSTER",
+        ),
+        InputMode::ClusterAdd => (
+            "  Tab:next field  Enter:save  Esc:cancel".to_string(),
+            "ADD NODE",
+        ),
+    }
+}
+
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
     // If a download is in progress, show the progress bar
     if let Some(status) = &app.pull_status {
@@ -915,40 +1229,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             format!(" {} ", status)
         };
 
-        let (keys, mode_text) = match app.input_mode {
-            InputMode::Normal => {
-                let detail_key = if app.show_detail {
-                    "Enter:table"
-                } else {
-                    "Enter:detail"
-                };
-                let ollama_keys = if app.ollama_available {
-                    let installed_key = if app.installed_first {
-                        "i:all"
-                    } else {
-                        "i:installed↑"
-                    };
-                    format!("  {}  d:pull  r:refresh", installed_key)
-                } else {
-                    String::new()
-                };
-                (
-                    format!(
-                        " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  t:theme{}  p:providers  q:quit",
-                        detail_key, ollama_keys,
-                    ),
-                    "NORMAL",
-                )
-            }
-            InputMode::Search => (
-                "  Type to search  Esc:done  Ctrl-U:clear".to_string(),
-                "SEARCH",
-            ),
-            InputMode::ProviderPopup => (
-                "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),
-                "PROVIDERS",
-            ),
-        };
+        let (keys, mode_text) = status_keys_and_mode(app);
 
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -982,41 +1263,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         return;
     }
 
-    let (keys, mode_text) = match app.input_mode {
-        InputMode::Normal => {
-            let detail_key = if app.show_detail {
-                "Enter:table"
-            } else {
-                "Enter:detail"
-            };
-            let any_provider = app.ollama_available || app.mlx_available;
-            let ollama_keys = if any_provider {
-                let installed_key = if app.installed_first {
-                    "i:all"
-                } else {
-                    "i:installed↑"
-                };
-                format!("  {}  d:pull  r:refresh", installed_key)
-            } else {
-                String::new()
-            };
-            (
-                format!(
-                    " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  t:theme{}  p:providers  q:quit",
-                    detail_key, ollama_keys,
-                ),
-                "NORMAL",
-            )
-        }
-        InputMode::Search => (
-            "  Type to search  Esc:done  Ctrl-U:clear".to_string(),
-            "SEARCH",
-        ),
-        InputMode::ProviderPopup => (
-            "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),
-            "PROVIDERS",
-        ),
-    };
+    let (keys, mode_text) = status_keys_and_mode(app);
 
     let status_line = Line::from(vec![
         Span::styled(

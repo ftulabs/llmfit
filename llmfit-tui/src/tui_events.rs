@@ -19,6 +19,8 @@ pub fn handle_events(app: &mut App) -> std::io::Result<bool> {
             InputMode::Normal => handle_normal_mode(app, key),
             InputMode::Search => handle_search_mode(app, key),
             InputMode::ProviderPopup => handle_provider_popup_mode(app, key),
+            InputMode::ClusterPopup => handle_cluster_popup_mode(app, key),
+            InputMode::ClusterAdd => handle_cluster_add_mode(app, key),
         }
         return Ok(true);
     }
@@ -63,6 +65,9 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
 
         // Provider popup
         KeyCode::Char('p') => app.open_provider_popup(),
+
+        // Cluster configuration popup
+        KeyCode::Char('c') => app.open_cluster_popup(),
 
         // Installed-first sort toggle (any provider)
         KeyCode::Char('i') if app.ollama_available || app.mlx_available => {
@@ -133,6 +138,43 @@ fn handle_provider_popup_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char(' ') | KeyCode::Enter => app.provider_popup_toggle(),
 
         KeyCode::Char('a') => app.provider_popup_select_all(),
+
+        _ => {}
+    }
+}
+
+fn handle_cluster_popup_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.close_cluster_popup(),
+
+        KeyCode::Up | KeyCode::Char('k') => app.cluster_popup_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.cluster_popup_down(),
+
+        // Add a new node
+        KeyCode::Char('a') => app.start_cluster_add(),
+
+        // Delete selected node
+        KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Delete => app.cluster_delete_node(),
+
+        // Toggle cluster mode on/off
+        KeyCode::Enter => app.toggle_cluster(),
+
+        _ => {}
+    }
+}
+
+fn handle_cluster_add_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.cancel_cluster_add(),
+
+        KeyCode::Tab | KeyCode::Down => app.cluster_form_next_field(),
+        KeyCode::BackTab | KeyCode::Up => app.cluster_form_prev_field(),
+
+        KeyCode::Enter => app.cluster_form_submit(),
+
+        KeyCode::Backspace => app.cluster_form_backspace(),
+
+        KeyCode::Char(c) => app.cluster_form_input(c),
 
         _ => {}
     }

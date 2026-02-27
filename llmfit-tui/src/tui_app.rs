@@ -15,6 +15,125 @@ pub enum InputMode {
     Normal,
     Search,
     ProviderPopup,
+    ClusterPopup,
+    ClusterAdd,
+}
+
+/// Tracks which field is active in the cluster add-node form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClusterField {
+    Count,
+    Name,
+    Ram,
+    Vram,
+    Cores,
+}
+
+impl ClusterField {
+    pub fn next(self) -> Self {
+        match self {
+            ClusterField::Count => ClusterField::Name,
+            ClusterField::Name => ClusterField::Ram,
+            ClusterField::Ram => ClusterField::Vram,
+            ClusterField::Vram => ClusterField::Cores,
+            ClusterField::Cores => ClusterField::Count,
+        }
+    }
+    pub fn prev(self) -> Self {
+        match self {
+            ClusterField::Count => ClusterField::Cores,
+            ClusterField::Name => ClusterField::Count,
+            ClusterField::Ram => ClusterField::Name,
+            ClusterField::Vram => ClusterField::Ram,
+            ClusterField::Cores => ClusterField::Vram,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            ClusterField::Count => "Count",
+            ClusterField::Name => "Name",
+            ClusterField::Ram => "RAM",
+            ClusterField::Vram => "VRAM",
+            ClusterField::Cores => "Cores",
+        }
+    }
+    pub fn all() -> &'static [ClusterField] {
+        &[
+            ClusterField::Count,
+            ClusterField::Name,
+            ClusterField::Ram,
+            ClusterField::Vram,
+            ClusterField::Cores,
+        ]
+    }
+}
+
+/// State for the add-node form in the cluster popup.
+#[derive(Debug, Clone)]
+pub struct ClusterForm {
+    pub active_field: ClusterField,
+    pub count: String,
+    pub name: String,
+    pub ram: String,
+    pub vram: String,
+    pub cores: String,
+    pub error: Option<String>,
+}
+
+impl ClusterForm {
+    pub fn new() -> Self {
+        ClusterForm {
+            active_field: ClusterField::Count,
+            count: "1".to_string(),
+            name: String::new(),
+            ram: String::new(),
+            vram: String::new(),
+            cores: String::new(),
+            error: None,
+        }
+    }
+
+    pub fn field_value(&self, field: ClusterField) -> &str {
+        match field {
+            ClusterField::Count => &self.count,
+            ClusterField::Name => &self.name,
+            ClusterField::Ram => &self.ram,
+            ClusterField::Vram => &self.vram,
+            ClusterField::Cores => &self.cores,
+        }
+    }
+
+    pub fn field_value_mut(&mut self, field: ClusterField) -> &mut String {
+        match field {
+            ClusterField::Count => &mut self.count,
+            ClusterField::Name => &mut self.name,
+            ClusterField::Ram => &mut self.ram,
+            ClusterField::Vram => &mut self.vram,
+            ClusterField::Cores => &mut self.cores,
+        }
+    }
+
+    /// Build a node spec string and parse it.
+    pub fn try_build(&self) -> Result<llmfit_core::cluster::ClusterNode, String> {
+        if self.name.is_empty() {
+            return Err("Name is required".to_string());
+        }
+        if self.ram.is_empty() {
+            return Err("RAM is required".to_string());
+        }
+
+        let mut spec = format!("{}:{}:{}", self.count, self.name, self.ram);
+        if !self.vram.is_empty() {
+            spec.push(':');
+            spec.push_str(&self.vram);
+        }
+        if !self.cores.is_empty() {
+            spec.push(':');
+            spec.push_str(&self.cores);
+        }
+
+        llmfit_core::cluster::ClusterConfig::parse_node(&spec)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +217,14 @@ pub struct App {
 
     // Theme
     pub theme: Theme,
+
+    // Cluster configuration
+    pub cluster_nodes: Vec<llmfit_core::cluster::ClusterNode>,
+    pub cluster_active: bool,
+    pub cluster_cursor: usize,
+    pub cluster_form: Option<ClusterForm>,
+    pub context_limit: Option<u32>,
+    local_specs: SystemSpecs,
 }
 
 impl App {
@@ -155,6 +282,7 @@ impl App {
 
         let filtered_count = all_fits.len();
 
+        let local_specs = specs.clone();
         let mut app = App {
             should_quit: false,
             input_mode: InputMode::Normal,
@@ -184,10 +312,183 @@ impl App {
             tick_count: 0,
             confirm_download: false,
             theme: Theme::load(),
+            cluster_nodes: Vec::new(),
+            cluster_active: false,
+            cluster_cursor: 0,
+            cluster_form: None,
+            context_limit,
+            local_specs,
         };
 
         app.apply_filters();
         app
+    }
+
+    // ── Cluster configuration ────────────────────────────────────
+
+    pub fn open_cluster_popup(&mut self) {
+        self.input_mode = InputMode::ClusterPopup;
+    }
+
+    pub fn close_cluster_popup(&mut self) {
+        self.input_mode = InputMode::Normal;
+        self.cluster_form = None;
+    }
+
+    pub fn cluster_popup_up(&mut self) {
+        if self.cluster_cursor > 0 {
+            self.cluster_cursor -= 1;
+        }
+    }
+
+    pub fn cluster_popup_down(&mut self) {
+        if !self.cluster_nodes.is_empty() && self.cluster_cursor < self.cluster_nodes.len() - 1 {
+            self.cluster_cursor += 1;
+        }
+    }
+
+    pub fn start_cluster_add(&mut self) {
+        self.cluster_form = Some(ClusterForm::new());
+        self.input_mode = InputMode::ClusterAdd;
+    }
+
+    pub fn cancel_cluster_add(&mut self) {
+        self.cluster_form = None;
+        self.input_mode = InputMode::ClusterPopup;
+    }
+
+    pub fn cluster_form_next_field(&mut self) {
+        if let Some(form) = &mut self.cluster_form {
+            form.active_field = form.active_field.next();
+            form.error = None;
+        }
+    }
+
+    pub fn cluster_form_prev_field(&mut self) {
+        if let Some(form) = &mut self.cluster_form {
+            form.active_field = form.active_field.prev();
+            form.error = None;
+        }
+    }
+
+    pub fn cluster_form_input(&mut self, c: char) {
+        if let Some(form) = &mut self.cluster_form {
+            let field = form.active_field;
+            form.field_value_mut(field).push(c);
+            form.error = None;
+        }
+    }
+
+    pub fn cluster_form_backspace(&mut self) {
+        if let Some(form) = &mut self.cluster_form {
+            let field = form.active_field;
+            form.field_value_mut(field).pop();
+            form.error = None;
+        }
+    }
+
+    pub fn cluster_form_submit(&mut self) {
+        let Some(form) = &self.cluster_form else {
+            return;
+        };
+        match form.try_build() {
+            Ok(node) => {
+                self.cluster_nodes.push(node);
+                self.cluster_form = None;
+                self.input_mode = InputMode::ClusterPopup;
+                if self.cluster_active {
+                    self.recalculate_cluster();
+                }
+            }
+            Err(e) => {
+                if let Some(form) = &mut self.cluster_form {
+                    form.error = Some(e);
+                }
+            }
+        }
+    }
+
+    pub fn cluster_delete_node(&mut self) {
+        if !self.cluster_nodes.is_empty() {
+            self.cluster_nodes.remove(self.cluster_cursor);
+            if self.cluster_cursor > 0 && self.cluster_cursor >= self.cluster_nodes.len() {
+                self.cluster_cursor = self.cluster_nodes.len().saturating_sub(1);
+            }
+            if self.cluster_active {
+                if self.cluster_nodes.is_empty() {
+                    self.deactivate_cluster();
+                } else {
+                    self.recalculate_cluster();
+                }
+            }
+        }
+    }
+
+    pub fn toggle_cluster(&mut self) {
+        if self.cluster_active {
+            self.deactivate_cluster();
+        } else if !self.cluster_nodes.is_empty() {
+            self.activate_cluster();
+        }
+    }
+
+    fn activate_cluster(&mut self) {
+        self.cluster_active = true;
+        self.recalculate_cluster();
+    }
+
+    fn deactivate_cluster(&mut self) {
+        self.cluster_active = false;
+        self.specs = self.local_specs.clone();
+        self.recalculate_fits();
+    }
+
+    fn recalculate_cluster(&mut self) {
+        let mut config = llmfit_core::cluster::ClusterConfig::new();
+        for node in &self.cluster_nodes {
+            config.add_node(node.clone());
+        }
+        let (specs, _) = llmfit_core::cluster::analyze_cluster(
+            &config,
+            &ModelDatabase::new(),
+            self.context_limit,
+        );
+        self.specs = specs;
+        self.recalculate_fits();
+    }
+
+    fn recalculate_fits(&mut self) {
+        let db = ModelDatabase::new();
+        let mut all_fits: Vec<ModelFit> = db
+            .get_all_models()
+            .iter()
+            .map(|m| {
+                let mut fit =
+                    ModelFit::analyze_with_context_limit(m, &self.specs, self.context_limit);
+                fit.installed = providers::is_model_installed(&m.name, &self.ollama_installed)
+                    || providers::is_model_installed_mlx(&m.name, &self.mlx_installed);
+                fit
+            })
+            .collect();
+
+        // Apply cluster distribution adjustments when in cluster mode
+        if self.cluster_active {
+            let mut config = llmfit_core::cluster::ClusterConfig::new();
+            for node in &self.cluster_nodes {
+                config.add_node(node.clone());
+            }
+            for fit in &mut all_fits {
+                llmfit_core::cluster::adjust_for_cluster(fit, &config);
+            }
+        }
+
+        all_fits = llmfit_core::fit::rank_models_by_fit_opts_col(
+            all_fits,
+            self.installed_first,
+            self.sort_column,
+        );
+        self.all_fits = all_fits;
+        self.apply_filters();
     }
 
     pub fn apply_filters(&mut self) {
