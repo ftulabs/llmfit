@@ -75,6 +75,31 @@ enum Commands {
         model: String,
     },
 
+    /// Evaluate models against a multi-node cluster configuration
+    Cluster {
+        /// Node specification: count:name:ram[:vram[:cores]]
+        /// GPU example: "2:A100-40GB:128G:40G"
+        /// CPU example: "8:cpu:16G"
+        #[arg(long = "node", required = true, num_args = 1)]
+        nodes: Vec<String>,
+
+        /// Show only models that perfectly match recommended specs
+        #[arg(short, long)]
+        perfect: bool,
+
+        /// Limit number of results
+        #[arg(short = 'n', long)]
+        limit: Option<usize>,
+
+        /// Output results as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Cap context length used for memory estimation (tokens)
+        #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u32).range(1..))]
+        max_context: Option<u32>,
+    },
+
     /// Recommend top models for your hardware (JSON-friendly)
     Recommend {
         /// Limit number of recommendations
@@ -217,6 +242,43 @@ fn run_tui(memory_override: &Option<String>, context_limit: Option<u32>) -> std:
     Ok(())
 }
 
+fn run_cluster(
+    node_specs: Vec<String>,
+    perfect: bool,
+    limit: Option<usize>,
+    json: bool,
+    context_limit: Option<u32>,
+) {
+    let mut config = llmfit_core::cluster::ClusterConfig::new();
+    for spec in &node_specs {
+        match llmfit_core::cluster::ClusterConfig::parse_node(spec) {
+            Ok(node) => config.add_node(node),
+            Err(e) => {
+                eprintln!("Error parsing node spec '{}': {}", spec, e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let db = ModelDatabase::new();
+    let (specs, mut fits) = llmfit_core::cluster::analyze_cluster(&config, &db, context_limit);
+
+    if perfect {
+        fits.retain(|f| f.fit_level == llmfit_core::fit::FitLevel::Perfect);
+    }
+
+    if let Some(n) = limit {
+        fits.truncate(n);
+    }
+
+    if json {
+        display::display_json_cluster(&config, &specs, &fits);
+    } else {
+        display::display_cluster_config(&config);
+        display::display_model_fits(&fits);
+    }
+}
+
 fn run_recommend(
     limit: usize,
     use_case: Option<String>,
@@ -346,6 +408,16 @@ fn main() {
                 } else {
                     display::display_model_detail(&fit);
                 }
+            }
+
+            Commands::Cluster {
+                nodes,
+                perfect,
+                limit,
+                json,
+                max_context,
+            } => {
+                run_cluster(nodes, perfect, limit, json, max_context.or(context_limit));
             }
 
             Commands::Recommend {

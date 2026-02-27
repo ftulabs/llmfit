@@ -67,10 +67,11 @@ pub enum FitLevel {
 /// This is the "optimization" dimension, independent of memory fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum RunMode {
-    Gpu,        // Fully loaded into VRAM -- fast
-    MoeOffload, // MoE: active experts in VRAM, inactive offloaded to RAM
-    CpuOffload, // Partial GPU offload, spills to system RAM -- mixed
-    CpuOnly,    // Entirely in system RAM, no GPU -- slow
+    Gpu,         // Fully loaded into VRAM -- fast
+    Distributed, // Split across multiple GPUs in a cluster via tensor parallelism
+    MoeOffload,  // MoE: active experts in VRAM, inactive offloaded to RAM
+    CpuOffload,  // Partial GPU offload, spills to system RAM -- mixed
+    CpuOnly,     // Entirely in system RAM, no GPU -- slow
 }
 
 /// Multi-dimensional score components (0-100 each).
@@ -349,6 +350,7 @@ impl ModelFit {
     pub fn run_mode_text(&self) -> &str {
         match self.run_mode {
             RunMode::Gpu => "GPU",
+            RunMode::Distributed => "Dist",
             RunMode::MoeOffload => "MoE",
             RunMode::CpuOffload => "CPU+GPU",
             RunMode::CpuOnly => "CPU",
@@ -371,7 +373,7 @@ fn score_fit(
     }
 
     match run_mode {
-        RunMode::Gpu => {
+        RunMode::Gpu | RunMode::Distributed => {
             if recommended <= mem_available {
                 FitLevel::Perfect
             } else if mem_available >= mem_required * 1.2 {
@@ -677,10 +679,11 @@ fn estimate_tps(
 
     // Run mode penalties
     match run_mode {
-        RunMode::Gpu => {}                  // full speed
-        RunMode::MoeOffload => base *= 0.8, // expert switching latency
-        RunMode::CpuOffload => base *= 0.5, // significant penalty
-        RunMode::CpuOnly => base *= 0.3,    // worst case—override K to CPU
+        RunMode::Gpu => {}                      // full speed
+        RunMode::Distributed => base *= 0.85,   // multi-GPU communication overhead
+        RunMode::MoeOffload => base *= 0.8,     // expert switching latency
+        RunMode::CpuOffload => base *= 0.5,     // significant penalty
+        RunMode::CpuOnly => base *= 0.3,        // worst case—override K to CPU
     }
 
     // CPU-only should use CPU K regardless of detected GPU

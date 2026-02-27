@@ -162,9 +162,45 @@ cargo fmt
 cargo clippy
 ```
 
+## Cluster evaluation
+
+The `cluster` subcommand evaluates models against a multi-node cluster configuration.
+
+### Architecture
+
+- `llmfit-core/src/cluster.rs` — `ClusterNode`, `ClusterConfig`, `analyze_cluster()`.
+- `ClusterConfig::to_system_specs()` builds a synthetic `SystemSpecs` with aggregated resources (total VRAM, total RAM, total CPU cores) so the existing `ModelFit::analyze()` runs against cluster-wide capacity.
+- `adjust_for_cluster()` post-processes each fit: if a model needs more VRAM than any single card, it sets `RunMode::Distributed` and applies a multi-GPU communication overhead (~12% per additional GPU, capped at 50%).
+
+### CLI usage
+
+```sh
+llmfit cluster --node "2:A100-40GB:128G:40G" --node "8:cpu:16G"
+```
+
+Node spec format: `count:name:ram[:vram[:cores]]`
+- GPU nodes require VRAM field. CPU nodes use name "cpu" (case-insensitive).
+- RAM/VRAM accept suffixes: G, M, T (case-insensitive).
+- Cores default to 32 (GPU) or 8 (CPU) if omitted.
+
+Supports `--json`, `--perfect`, `-n`, `--max-context` flags like other subcommands.
+
+### RunMode::Distributed
+
+Added to the `RunMode` enum for models split across multiple GPUs via tensor parallelism in a cluster. Score fit behaves like `Gpu` (can reach Perfect). Speed has a communication overhead penalty. Only produced by the cluster analysis path — never by `ModelFit::analyze()` on a single instance.
+
 ## Platform notes
 
 - GPU detection shells out to `nvidia-smi` (NVIDIA) and `rocm-smi` (AMD). These are best-effort and fail silently if unavailable.
 - Apple Silicon detection uses `system_profiler SPDisplaysDataType`. On unified memory Macs, VRAM is reported as available system RAM (same pool).
 - `sysinfo` handles cross-platform RAM/CPU. No conditional compilation needed.
 - The TUI uses crossterm which works on Linux, macOS, and Windows terminals.
+
+## Cursor Cloud specific instructions
+
+- **Rust toolchain**: The project requires Rust stable 1.85+ (edition 2024). The current crate graph requires 1.88+ (sysinfo, time, ratatui). Use `rustup update stable` to get the latest stable.
+- **libssl-dev**: Required on Linux for the `ureq` crate (TLS). Install via `sudo apt-get install -y libssl-dev`.
+- **No GPU in cloud VM**: GPU detection will report "Not detected". The app works correctly in CPU-only mode. Use `--memory=SIZE` to simulate a GPU for testing fit calculations.
+- **TUI testing**: The TUI requires an interactive terminal. In headless environments, test via CLI subcommands (`--cli`, `system`, `fit`, `search`, `info`, `recommend`, `cluster`) or use the `computerUse` subagent.
+- **Common commands**: See `Makefile` and the "Common tasks" section above.
+- **Tests**: `cargo test` runs all unit tests (73 tests across fit, hardware, models, providers, and cluster modules).

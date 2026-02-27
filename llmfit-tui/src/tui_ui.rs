@@ -351,6 +351,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColors) {
 
             let mode_color = match fit.run_mode {
                 llmfit_core::fit::RunMode::Gpu => tc.mode_gpu,
+                llmfit_core::fit::RunMode::Distributed => tc.mode_moe,
                 llmfit_core::fit::RunMode::MoeOffload => tc.mode_moe,
                 llmfit_core::fit::RunMode::CpuOffload => tc.mode_offload,
                 llmfit_core::fit::RunMode::CpuOnly => tc.mode_cpu,

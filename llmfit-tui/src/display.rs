@@ -230,6 +230,97 @@ pub fn display_search_results(models: &[&LlmModel], query: &str) {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Cluster display
+// ────────────────────────────────────────────────────────────────────
+
+pub fn display_cluster_config(config: &llmfit_core::cluster::ClusterConfig) {
+    println!(
+        "\n{}",
+        "=== Cluster Configuration ===".bold().cyan()
+    );
+
+    #[derive(Tabled)]
+    struct NodeRow {
+        #[tabled(rename = "Node Type")]
+        name: String,
+        #[tabled(rename = "Count")]
+        count: String,
+        #[tabled(rename = "RAM")]
+        ram: String,
+        #[tabled(rename = "VRAM")]
+        vram: String,
+        #[tabled(rename = "Cores")]
+        cores: String,
+    }
+
+    let rows: Vec<NodeRow> = config
+        .nodes
+        .iter()
+        .map(|n| NodeRow {
+            name: n.name.clone(),
+            count: format!("{}", n.count),
+            ram: format!("{:.0} GB", n.ram_gb),
+            vram: n
+                .vram_gb
+                .map(|v| format!("{:.0} GB", v))
+                .unwrap_or_else(|| "-".to_string()),
+            cores: format!("{}", n.cpu_cores),
+        })
+        .collect();
+
+    let table = Table::new(rows).with(Style::rounded()).to_string();
+    println!("{}\n", table);
+
+    println!(
+        "{}: {} nodes, {:.0} GB total RAM, {:.0} GB total VRAM, {} GPUs, {} CPU cores\n",
+        "Totals".bold(),
+        config.total_node_count(),
+        config.total_ram_gb(),
+        config.total_vram_gb(),
+        config.total_gpu_count(),
+        config.total_cpu_cores(),
+    );
+}
+
+pub fn display_json_cluster(
+    config: &llmfit_core::cluster::ClusterConfig,
+    specs: &SystemSpecs,
+    fits: &[ModelFit],
+) {
+    let nodes_json: Vec<serde_json::Value> = config
+        .nodes
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "name": n.name,
+                "count": n.count,
+                "ram_gb": round2(n.ram_gb),
+                "vram_gb": n.vram_gb.map(round2),
+                "cpu_cores": n.cpu_cores,
+            })
+        })
+        .collect();
+
+    let models: Vec<serde_json::Value> = fits.iter().map(fit_to_json).collect();
+    let output = serde_json::json!({
+        "cluster": {
+            "nodes": nodes_json,
+            "total_nodes": config.total_node_count(),
+            "total_ram_gb": round2(config.total_ram_gb()),
+            "total_vram_gb": round2(config.total_vram_gb()),
+            "total_gpus": config.total_gpu_count(),
+            "total_cpu_cores": config.total_cpu_cores(),
+        },
+        "system": system_json(specs),
+        "models": models,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output).expect("JSON serialization failed")
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────
 // JSON output for machine consumption (OpenClaw skills, scripts, etc.)
 // ────────────────────────────────────────────────────────────────────
 
