@@ -234,10 +234,7 @@ pub fn display_search_results(models: &[&LlmModel], query: &str) {
 // ────────────────────────────────────────────────────────────────────
 
 pub fn display_cluster_config(config: &llmfit_core::cluster::ClusterConfig) {
-    println!(
-        "\n{}",
-        "=== Cluster Configuration ===".bold().cyan()
-    );
+    println!("\n{}", "=== Cluster Configuration ===".bold().cyan());
 
     #[derive(Tabled)]
     struct NodeRow {

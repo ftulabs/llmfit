@@ -179,8 +179,12 @@ impl ClusterConfig {
 }
 
 fn parse_memory(s: &str) -> Result<f64, String> {
-    crate::hardware::parse_memory_size(s)
-        .ok_or_else(|| format!("Invalid memory size '{}'. Expected format: 32G, 32000M, 1.5T", s))
+    crate::hardware::parse_memory_size(s).ok_or_else(|| {
+        format!(
+            "Invalid memory size '{}'. Expected format: 32G, 32000M, 1.5T",
+            s
+        )
+    })
 }
 
 /// Analyze all models in the database against a cluster configuration.
