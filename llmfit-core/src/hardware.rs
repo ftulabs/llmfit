@@ -11,6 +11,7 @@ pub enum GpuBackend {
     Sycl,   // Intel oneAPI
     CpuArm,
     CpuX86,
+    Ascend,
 }
 
 impl GpuBackend {
@@ -23,6 +24,7 @@ impl GpuBackend {
             GpuBackend::Sycl => "SYCL",
             GpuBackend::CpuArm => "CPU (ARM)",
             GpuBackend::CpuX86 => "CPU (x86)",
+            GpuBackend::Ascend => "NPU (Ascend)",
         }
     }
 }
@@ -223,6 +225,12 @@ impl SystemSpecs {
                 count: 1,
                 unified_memory: true,
             });
+        }
+
+        // Ascend NPUs via npu-smi
+        let ascend = Self::detect_ascend_npus();
+        if !ascend.is_empty() {
+            gpus.extend(ascend);
         }
 
         // Sort by VRAM descending so the best GPU is primary
@@ -988,6 +996,66 @@ impl SystemSpecs {
         } else {
             None
         }
+    }
+
+    /// Detect Ascend NPUs via npu-smi. Returns a vector of NPU info.
+    fn detect_ascend_npus() -> Vec<GpuInfo> {
+        // 1. Get the list of IDs
+        let list_output = match std::process::Command::new("npu-smi")
+            .args(["info", "-l"])
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => return Vec::new(),
+        };
+
+        let list_stdout = String::from_utf8_lossy(&list_output.stdout);
+
+        // Extracting IDs: ["0", "1", "2"...]
+        let ids: Vec<String> = list_stdout
+            .lines()
+            .filter(|line| line.contains("NPU ID"))
+            .filter_map(|line| line.split(':').last())
+            .map(|s| s.trim().to_string())
+            .collect();
+
+        if ids.is_empty() {
+            return Vec::new();
+        }
+
+        let mut npu_infos: Vec<GpuInfo> = Vec::new();
+        let npu_name = "Ascend NPU";
+
+        // 2. Loop through NPUs
+        for id in &ids {
+            let mem_output = std::process::Command::new("npu-smi")
+                .args(["info", "-t", "memory", "-i", id])
+                .output();
+
+            if let Ok(o) = mem_output {
+                let s = String::from_utf8_lossy(&o.stdout);
+
+                // Parse HBM Capacity (e.g., from "HBM Capacity(MB) : 65536")
+                let mem = s
+                    .lines()
+                    .find(|l| l.contains("HBM Capacity"))
+                    .and_then(|l| l.split(':').last())
+                    .and_then(|v| v.trim().split_whitespace().next())
+                    .and_then(|num| num.parse::<u64>().ok())
+                    .unwrap_or(0);
+
+                let npu_info = GpuInfo {
+                    name: npu_name.to_string(),
+                    vram_gb: Some((mem as f64) / 1024.0),
+                    backend: GpuBackend::Ascend,
+                    count: 1,
+                    unified_memory: false,
+                };
+                npu_infos.push(npu_info);
+            }
+        }
+
+        return npu_infos;
     }
 
     /// Fallback for available RAM when sysinfo returns 0.

@@ -129,6 +129,14 @@ pub struct LlmModel {
 }
 
 impl LlmModel {
+    /// MLX models are Apple-only — they won't run on NVIDIA/AMD/Intel hardware.
+    /// We detect them by the `-MLX-` suffix that's standard on HuggingFace
+    /// (e.g. `Qwen3-8B-MLX-4bit`, `LFM2-1.2B-MLX-8bit`).
+    pub fn is_mlx_model(&self) -> bool {
+        let name_lower = self.name.to_lowercase();
+        name_lower.contains("-mlx-") || name_lower.ends_with("-mlx")
+    }
+
     /// Bytes-per-parameter for the model's quantization level.
     fn quant_bpp(&self) -> f64 {
         quant_bpp(&self.quantization)

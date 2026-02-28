@@ -552,6 +552,14 @@ fn best_quant_for_runtime_budget(
         })
 }
 
+pub fn backend_compatible(model: &LlmModel, system: &SystemSpecs) -> bool {
+    if model.is_mlx_model() {
+        system.backend == GpuBackend::Metal && system.unified_memory
+    } else {
+        true
+    }
+}
+
 pub fn rank_models_by_fit(models: Vec<ModelFit>) -> Vec<ModelFit> {
     rank_models_by_fit_opts(models, false)
 }
@@ -664,6 +672,7 @@ fn estimate_tps(
         (GpuBackend::Sycl, _) => 100.0,
         (GpuBackend::CpuArm, _) => 90.0,
         (GpuBackend::CpuX86, _) => 70.0,
+        (GpuBackend::Ascend, _) => 390.0,
     };
 
     let params = model.params_b().max(0.1);

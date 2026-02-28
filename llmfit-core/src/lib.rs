@@ -8,4 +8,4 @@ pub use cluster::{ClusterConfig, ClusterNode};
 pub use fit::{FitLevel, InferenceRuntime, ModelFit, RunMode, ScoreComponents, SortColumn};
 pub use hardware::{GpuBackend, SystemSpecs};
 pub use models::{LlmModel, ModelDatabase, UseCase};
-pub use providers::{MlxProvider, ModelProvider, OllamaProvider};
+pub use providers::{LlamaCppProvider, MlxProvider, ModelProvider, OllamaProvider};
