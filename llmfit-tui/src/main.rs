@@ -5,10 +5,47 @@ mod tui_events;
 mod tui_ui;
 
 use clap::{Parser, Subcommand};
-use llmfit_core::fit::{ModelFit, backend_compatible};
+use llmfit_core::fit::{ModelFit, SortColumn, backend_compatible};
 use llmfit_core::hardware::SystemSpecs;
 use llmfit_core::models::ModelDatabase;
 use llmfit_core::plan::{PlanRequest, estimate_model_plan, resolve_model_selector};
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum SortArg {
+    /// Composite ranking score (default)
+    Score,
+    /// Estimated tokens/second
+    #[value(alias = "tokens", alias = "toks", alias = "throughput")]
+    Tps,
+    /// Model parameter count
+    Params,
+    /// Memory utilization percentage
+    #[value(alias = "memory", alias = "mem_pct", alias = "utilization")]
+    Mem,
+    /// Context window length
+    #[value(alias = "context")]
+    Ctx,
+    /// Release date (newest first)
+    #[value(alias = "release", alias = "released")]
+    Date,
+    /// Use-case grouping
+    #[value(alias = "use_case", alias = "usecase")]
+    Use,
+}
+
+impl From<SortArg> for SortColumn {
+    fn from(value: SortArg) -> Self {
+        match value {
+            SortArg::Score => SortColumn::Score,
+            SortArg::Tps => SortColumn::Tps,
+            SortArg::Params => SortColumn::Params,
+            SortArg::Mem => SortColumn::MemPct,
+            SortArg::Ctx => SortColumn::Ctx,
+            SortArg::Date => SortColumn::ReleaseDate,
+            SortArg::Use => SortColumn::UseCase,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "llmfit")]
@@ -25,6 +62,10 @@ struct Cli {
     /// Limit number of results
     #[arg(short = 'n', long)]
     limit: Option<usize>,
+
+    /// Sort column for CLI fit output
+    #[arg(long, value_enum, default_value_t = SortArg::Score)]
+    sort: SortArg,
 
     /// Use classic CLI table output instead of TUI
     #[arg(long)]
@@ -62,6 +103,10 @@ enum Commands {
         /// Limit number of results
         #[arg(short = 'n', long)]
         limit: Option<usize>,
+
+        /// Sort column for fit output
+        #[arg(long, value_enum, default_value_t = SortArg::Score)]
+        sort: SortArg,
     },
 
     /// Search for specific models
@@ -214,6 +259,7 @@ fn resolve_context_limit(max_context: Option<u32>) -> Option<u32> {
 fn run_fit(
     perfect: bool,
     limit: Option<usize>,
+    sort: SortColumn,
     json: bool,
     memory_override: &Option<String>,
     context_limit: Option<u32>,
@@ -242,7 +288,7 @@ fn run_fit(
         fits.retain(|f| f.fit_level == llmfit_core::fit::FitLevel::Perfect);
     }
 
-    fits = llmfit_core::fit::rank_models_by_fit(fits);
+    fits = llmfit_core::fit::rank_models_by_fit_opts_col(fits, false, sort);
 
     if let Some(n) = limit {
         fits.truncate(n);
@@ -779,8 +825,19 @@ fn main() {
                 display::display_all_models(db.get_all_models());
             }
 
-            Commands::Fit { perfect, limit } => {
-                run_fit(perfect, limit, cli.json, &cli.memory, context_limit);
+            Commands::Fit {
+                perfect,
+                limit,
+                sort,
+            } => {
+                run_fit(
+                    perfect,
+                    limit,
+                    sort.into(),
+                    cli.json,
+                    &cli.memory,
+                    context_limit,
+                );
             }
 
             Commands::Search { query } => {
@@ -875,7 +932,14 @@ fn main() {
 
     // If --cli flag, use classic fit output
     if cli.cli {
-        run_fit(cli.perfect, cli.limit, cli.json, &cli.memory, context_limit);
+        run_fit(
+            cli.perfect,
+            cli.limit,
+            cli.sort.into(),
+            cli.json,
+            &cli.memory,
+            context_limit,
+        );
         return;
     }
 
