@@ -707,11 +707,134 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
     );
     frame.render_widget(title, sections[0]);
 
+    let score_delta = right.score - left.score;
+    let tps_delta = right.estimated_tps - left.estimated_tps;
+    let mem_delta = right.utilization_pct - left.utilization_pct;
+    let params_delta = right.model.params_b() - left.model.params_b();
+    let ctx_delta = right.model.context_length as i64 - left.model.context_length as i64;
+
+    let score_hint = if score_delta > 0.05 {
+        " ↑"
+    } else if score_delta < -0.05 {
+        " ↓"
+    } else {
+        " ="
+    };
+    let tps_hint = if tps_delta > 0.05 {
+        " ↑"
+    } else if tps_delta < -0.05 {
+        " ↓"
+    } else {
+        " ="
+    };
+    let mem_hint = if mem_delta < -0.05 {
+        " ↑"
+    } else if mem_delta > 0.05 {
+        " ↓"
+    } else {
+        " ="
+    };
+    let params_hint = if params_delta > 0.01 {
+        " ↑"
+    } else if params_delta < -0.01 {
+        " ↓"
+    } else {
+        " ="
+    };
+    let ctx_hint = if ctx_delta > 0 {
+        " ↑"
+    } else if ctx_delta < 0 {
+        " ↓"
+    } else {
+        " ="
+    };
+
+    let score_style = Style::default().fg(if score_delta >= 0.0 {
+        tc.good
+    } else {
+        tc.warning
+    });
+    let tps_style = Style::default().fg(if tps_delta >= 0.0 {
+        tc.good
+    } else {
+        tc.warning
+    });
+    let mem_style = Style::default().fg(if mem_delta <= 0.0 {
+        tc.good
+    } else {
+        tc.warning
+    });
+    let params_style = Style::default().fg(if params_delta >= 0.0 {
+        tc.good
+    } else {
+        tc.warning
+    });
+    let ctx_style = Style::default().fg(if ctx_delta >= 0 { tc.good } else { tc.warning });
+
+    let left_badges = {
+        let mut tags = Vec::new();
+        if left.model.is_moe {
+            tags.push("MoE");
+        }
+        if left.run_mode == llmfit_core::fit::RunMode::MoeOffload {
+            tags.push("Offload");
+        }
+        if !left.notes.is_empty() {
+            tags.push("Notes");
+        }
+        if tags.is_empty() {
+            "-".to_string()
+        } else {
+            tags.join(", ")
+        }
+    };
+    let right_badges = {
+        let mut tags = Vec::new();
+        if right.model.is_moe {
+            tags.push("MoE");
+        }
+        if right.run_mode == llmfit_core::fit::RunMode::MoeOffload {
+            tags.push("Offload");
+        }
+        if !right.notes.is_empty() {
+            tags.push("Notes");
+        }
+        if tags.is_empty() {
+            "-".to_string()
+        } else {
+            tags.join(", ")
+        }
+    };
+
     let left_lines = vec![
         Line::from(""),
         Line::from(vec![
             Span::styled("  Model: ", Style::default().fg(tc.muted)),
             Span::styled(&left.model.name, Style::default().fg(tc.fg).bold()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Provider:", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!(" {}", left.model.provider),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Use:    ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!(" {}", left.use_case.label()),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Released:", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!(
+                    " {}",
+                    left.model.release_date.as_deref().unwrap_or("Unknown")
+                ),
+                Style::default().fg(tc.fg),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  Score: ", Style::default().fg(tc.muted)),
@@ -765,7 +888,14 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         ]),
         Line::from(vec![
             Span::styled("  Quant:  ", Style::default().fg(tc.muted)),
-            Span::styled(&left.best_quant, Style::default().fg(tc.good)),
+            Span::styled(
+                format!("{} (default {})", left.best_quant, left.model.quantization),
+                Style::default().fg(tc.good),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Badges: ", Style::default().fg(tc.muted)),
+            Span::styled(left_badges, Style::default().fg(tc.info)),
         ]),
     ];
     frame.render_widget(
@@ -779,9 +909,6 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         cols[0],
     );
 
-    let score_delta = right.score - left.score;
-    let tps_delta = right.estimated_tps - left.estimated_tps;
-    let mem_delta = right.utilization_pct - left.utilization_pct;
     let right_lines = vec![
         Line::from(""),
         Line::from(vec![
@@ -789,14 +916,34 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             Span::styled(&right.model.name, Style::default().fg(tc.fg).bold()),
         ]),
         Line::from(vec![
+            Span::styled("  Provider:", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!(" {}", right.model.provider),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Use:    ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!(" {}", right.use_case.label()),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Released:", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!(
+                    " {}",
+                    right.model.release_date.as_deref().unwrap_or("Unknown")
+                ),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
             Span::styled("  Score: ", Style::default().fg(tc.muted)),
             Span::styled(
-                format!("{:.1} ({:+.1})", right.score, score_delta),
-                Style::default().fg(if score_delta >= 0.0 {
-                    tc.good
-                } else {
-                    tc.warning
-                }),
+                format!("{:.1} ({:+.1}){}", right.score, score_delta, score_hint),
+                score_style,
             ),
         ]),
         Line::from(vec![
@@ -809,23 +956,18 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         Line::from(vec![
             Span::styled("  tok/s: ", Style::default().fg(tc.muted)),
             Span::styled(
-                format!("{:.1} ({:+.1})", right.estimated_tps, tps_delta),
-                Style::default().fg(if tps_delta >= 0.0 {
-                    tc.good
-                } else {
-                    tc.warning
-                }),
+                format!("{:.1} ({:+.1}){}", right.estimated_tps, tps_delta, tps_hint),
+                tps_style,
             ),
         ]),
         Line::from(vec![
             Span::styled("  Mem%:  ", Style::default().fg(tc.muted)),
             Span::styled(
-                format!("{:.1}% ({:+.1}%)", right.utilization_pct, mem_delta),
-                Style::default().fg(if mem_delta <= 0.0 {
-                    tc.good
-                } else {
-                    tc.warning
-                }),
+                format!(
+                    "{:.1}% ({:+.1}%){}",
+                    right.utilization_pct, mem_delta, mem_hint
+                ),
+                mem_style,
             ),
         ]),
         Line::from(vec![
@@ -841,18 +983,37 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         ]),
         Line::from(vec![
             Span::styled("  Params: ", Style::default().fg(tc.muted)),
-            Span::styled(&right.model.parameter_count, Style::default().fg(tc.fg)),
+            Span::styled(
+                format!(
+                    "{} ({:+.2}B){}",
+                    right.model.parameter_count, params_delta, params_hint
+                ),
+                params_style,
+            ),
         ]),
         Line::from(vec![
             Span::styled("  Context:", Style::default().fg(tc.muted)),
             Span::styled(
-                format!(" {} tokens", right.model.context_length),
-                Style::default().fg(tc.fg),
+                format!(
+                    " {} tokens ({:+}){}",
+                    right.model.context_length, ctx_delta, ctx_hint
+                ),
+                ctx_style,
             ),
         ]),
         Line::from(vec![
             Span::styled("  Quant:  ", Style::default().fg(tc.muted)),
-            Span::styled(&right.best_quant, Style::default().fg(tc.good)),
+            Span::styled(
+                format!(
+                    "{} (default {})",
+                    right.best_quant, right.model.quantization
+                ),
+                Style::default().fg(tc.good),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Badges: ", Style::default().fg(tc.muted)),
+            Span::styled(right_badges, Style::default().fg(tc.info)),
         ]),
     ];
     frame.render_widget(
