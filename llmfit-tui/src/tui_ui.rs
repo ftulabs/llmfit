@@ -598,7 +598,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColors) {
         Constraint::Length(8),  // params
         Constraint::Length(6),  // score
         Constraint::Length(6),  // tok/s
-        Constraint::Length(7),  // quant
+        Constraint::Length(10), // quant (AWQ-4bit, GPTQ-Int4, GPTQ-Int8)
         Constraint::Length(7),  // mode
         Constraint::Length(6),  // mem %
         Constraint::Length(5),  // ctx
@@ -1047,10 +1047,10 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             Span::styled("  Runtime:     ", Style::default().fg(tc.muted)),
             Span::styled(
                 fit.runtime_text(),
-                Style::default().fg(if fit.runtime == llmfit_core::fit::InferenceRuntime::Mlx {
-                    tc.accent
-                } else {
-                    tc.fg
+                Style::default().fg(match fit.runtime {
+                    llmfit_core::fit::InferenceRuntime::Mlx => tc.accent,
+                    llmfit_core::fit::InferenceRuntime::Vllm => tc.accent_secondary,
+                    _ => tc.fg,
                 }),
             ),
             Span::styled(

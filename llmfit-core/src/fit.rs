@@ -7,6 +7,7 @@ use crate::models::{self, LlmModel, UseCase};
 pub enum InferenceRuntime {
     LlamaCpp, // llama.cpp / Ollama
     Mlx,      // Apple MLX framework
+    Vllm,     // vLLM (for AWQ/GPTQ pre-quantized models)
 }
 
 impl InferenceRuntime {
@@ -14,6 +15,7 @@ impl InferenceRuntime {
         match self {
             InferenceRuntime::LlamaCpp => "llama.cpp",
             InferenceRuntime::Mlx => "MLX",
+            InferenceRuntime::Vllm => "vLLM",
         }
     }
 }
@@ -136,7 +138,9 @@ impl ModelFit {
 
         // Determine inference runtime up front so path selection can use
         // the correct quantization hierarchy.
-        let runtime = if system.backend == GpuBackend::Metal && system.unified_memory {
+        let runtime = if model.is_prequantized() {
+            InferenceRuntime::Vllm
+        } else if system.backend == GpuBackend::Metal && system.unified_memory {
             InferenceRuntime::Mlx
         } else {
             InferenceRuntime::LlamaCpp
@@ -243,23 +247,28 @@ impl ModelFit {
         };
 
         // Dynamic quantization: find best quant that fits
-        let budget = mem_available;
-        let hierarchy: &[&str] = if runtime == InferenceRuntime::Mlx {
-            models::MLX_QUANT_HIERARCHY
+        // Pre-quantized models (AWQ/GPTQ) have a fixed quantization — skip dynamic selection.
+        let (best_quant, _best_quant_mem) = if model.is_prequantized() {
+            (model.quantization.as_str(), mem_required)
         } else {
-            models::QUANT_HIERARCHY
+            let budget = mem_available;
+            let hierarchy: &[&str] = if runtime == InferenceRuntime::Mlx {
+                models::MLX_QUANT_HIERARCHY
+            } else {
+                models::QUANT_HIERARCHY
+            };
+            model
+                .best_quant_for_budget_with(budget, estimation_ctx, hierarchy)
+                .or_else(|| {
+                    // Fall back to GGUF hierarchy if MLX quants don't fit
+                    if runtime == InferenceRuntime::Mlx {
+                        model.best_quant_for_budget(budget, estimation_ctx)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or((model.quantization.as_str(), mem_required))
         };
-        let (best_quant, _best_quant_mem) = model
-            .best_quant_for_budget_with(budget, estimation_ctx, hierarchy)
-            .or_else(|| {
-                // Fall back to GGUF hierarchy if MLX quants don't fit
-                if runtime == InferenceRuntime::Mlx {
-                    model.best_quant_for_budget(budget, estimation_ctx)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or((model.quantization.as_str(), mem_required));
         let best_quant_str = if best_quant != model.quantization {
             notes.push(format!(
                 "Best quantization for hardware: {} (model default: {})",
@@ -540,6 +549,10 @@ fn best_quant_for_runtime_budget(
     budget: f64,
     estimation_ctx: u32,
 ) -> Option<(&'static str, f64)> {
+    // Pre-quantized models (vLLM) don't support dynamic re-quantization
+    if runtime == InferenceRuntime::Vllm {
+        return None;
+    }
     let hierarchy: &[&str] = if runtime == InferenceRuntime::Mlx {
         models::MLX_QUANT_HIERARCHY
     } else {
@@ -559,6 +572,8 @@ fn best_quant_for_runtime_budget(
 pub fn backend_compatible(model: &LlmModel, system: &SystemSpecs) -> bool {
     if model.is_mlx_model() {
         system.backend == GpuBackend::Metal && system.unified_memory
+    } else if model.is_prequantized() {
+        matches!(system.backend, GpuBackend::Cuda | GpuBackend::Rocm)
     } else {
         true
     }
@@ -758,6 +773,7 @@ fn estimate_tps(
     let k: f64 = match (system.backend, runtime) {
         (GpuBackend::Metal, InferenceRuntime::Mlx) => 250.0,
         (GpuBackend::Metal, InferenceRuntime::LlamaCpp) => 160.0,
+        (GpuBackend::Metal, InferenceRuntime::Vllm) => 160.0,
         (GpuBackend::Cuda, _) => 220.0,
         (GpuBackend::Rocm, _) => 180.0,
         (GpuBackend::Vulkan, _) => 150.0,
@@ -989,6 +1005,7 @@ mod tests {
             release_date: None,
             gguf_sources: vec![],
             capabilities: vec![],
+            format: models::ModelFormat::default(),
         }
     }
 
@@ -1164,6 +1181,7 @@ mod tests {
             release_date: None,
             gguf_sources: vec![],
             capabilities: vec![],
+            format: models::ModelFormat::default(),
         };
         let mut system = test_system(64.0, true, Some(8.0));
         system.backend = GpuBackend::Cuda;
@@ -1196,6 +1214,7 @@ mod tests {
             release_date: None,
             gguf_sources: vec![],
             capabilities: vec![],
+            format: models::ModelFormat::default(),
         };
         let system = test_system(12.0, true, Some(8.0));
 
@@ -1752,5 +1771,35 @@ mod tests {
             (tps_4090 - tps_unknown).abs() < 0.01,
             "CPU-only should ignore GPU: 4090={tps_4090}, unknown={tps_unknown}"
         );
+    }
+
+    #[test]
+    fn test_prequantized_requires_cuda_or_rocm() {
+        let mut model = test_model("7B", 4.0, Some(4.0));
+        model.format = models::ModelFormat::Awq;
+
+        // AWQ on CUDA → compatible
+        let cuda_sys = test_system(64.0, true, Some(24.0));
+        assert!(backend_compatible(&model, &cuda_sys));
+
+        // AWQ on Metal → incompatible (no vllm-metal support yet)
+        let mut metal_sys = test_system(64.0, true, Some(64.0));
+        metal_sys.backend = GpuBackend::Metal;
+        metal_sys.unified_memory = true;
+        assert!(!backend_compatible(&model, &metal_sys));
+
+        // AWQ on Vulkan → incompatible
+        let mut vulkan_sys = test_system(64.0, true, Some(24.0));
+        vulkan_sys.backend = GpuBackend::Vulkan;
+        assert!(!backend_compatible(&model, &vulkan_sys));
+
+        // GPTQ on CUDA → compatible
+        model.format = models::ModelFormat::Gptq;
+        assert!(backend_compatible(&model, &cuda_sys));
+
+        // Regular GGUF on Metal → compatible (unchanged behavior)
+        let mut gguf_model = test_model("7B", 4.0, Some(4.0));
+        gguf_model.format = models::ModelFormat::Gguf;
+        assert!(backend_compatible(&gguf_model, &metal_sys));
     }
 }

@@ -216,6 +216,10 @@ QUANT_BPP = {
     "Q4_0":   0.5,
     "Q3_K_M": 0.4375,
     "Q2_K":   0.3125,
+    "AWQ-4bit": 0.5,
+    "AWQ-8bit": 1.0,
+    "GPTQ-Int4": 0.5,
+    "GPTQ-Int8": 1.0,
 }
 
 # Overhead multiplier for runtime memory beyond just model weights
@@ -501,6 +505,73 @@ def infer_capabilities(repo_id: str, pipeline_tag: str | None, use_case: str) ->
     return caps
 
 
+def detect_quant_format(repo_id: str, config: dict | None) -> tuple[str, str]:
+    """Detect quantization format and label from config.json.
+
+    Returns (format, quant_label) where:
+    - format: "gguf", "awq", "gptq", "mlx", or "safetensors"
+    - quant_label: e.g. "AWQ-4bit", "GPTQ-Int4", "Q4_K_M"
+    """
+    if not config:
+        return _detect_format_from_name(repo_id)
+
+    quant_config = config.get("quantization_config", {})
+    if not quant_config:
+        return _detect_format_from_name(repo_id)
+
+    quant_method = quant_config.get("quant_method", "")
+    bits = quant_config.get("bits", quant_config.get("num_bits", 4))
+
+    # AWQ
+    if quant_method == "awq":
+        label = f"AWQ-{bits}bit"
+        return ("awq", label)
+
+    # GPTQ (including gptq_marlin)
+    if quant_method.startswith("gptq"):
+        label = f"GPTQ-Int{bits}"
+        return ("gptq", label)
+
+    # compressed-tensors: dig into config_groups for bits, check name for format
+    if quant_method == "compressed-tensors":
+        # Try to extract bits from config_groups
+        config_groups = quant_config.get("config_groups", {})
+        for group in config_groups.values():
+            if isinstance(group, dict):
+                weights = group.get("weights", {})
+                if "num_bits" in weights:
+                    bits = weights["num_bits"]
+                    break
+
+        name_upper = repo_id.upper()
+        if "-AWQ" in name_upper:
+            label = f"AWQ-{bits}bit"
+            return ("awq", label)
+        elif "-GPTQ" in name_upper:
+            label = f"GPTQ-Int{bits}"
+            return ("gptq", label)
+
+    return _detect_format_from_name(repo_id)
+
+
+def _detect_format_from_name(repo_id: str) -> tuple[str, str]:
+    """Fallback: detect format from model name patterns."""
+    name_upper = repo_id.upper()
+
+    if "-AWQ-8BIT" in name_upper:
+        return ("awq", "AWQ-8bit")
+    if "-AWQ" in name_upper:
+        return ("awq", "AWQ-4bit")
+    if "-GPTQ-INT8" in name_upper or "-GPTQ-8BIT" in name_upper:
+        return ("gptq", "GPTQ-Int8")
+    if "-GPTQ" in name_upper:
+        return ("gptq", "GPTQ-Int4")
+    if "-MLX-" in name_upper or name_upper.endswith("-MLX"):
+        return ("mlx", "Q4_K_M")  # MLX uses its own quant scheme handled elsewhere
+
+    return ("gguf", "Q4_K_M")
+
+
 def scrape_model(repo_id: str) -> dict | None:
     """Scrape a single model and return an LlmModel-compatible dict."""
     info = fetch_model_info(repo_id)
@@ -521,10 +592,12 @@ def scrape_model(repo_id: str) -> dict | None:
 
     config = info.get("config", {})
     pipeline_tag = info.get("pipeline_tag")
-    default_quant = "Q4_K_M"
 
     # Fetch full config.json for accurate context length
     full_config = fetch_config_json(repo_id)
+
+    # Detect quantization format from config.json
+    model_format, default_quant = detect_quant_format(repo_id, full_config)
     context_length = infer_context_length(full_config) if full_config else infer_context_length(config)
 
     min_ram, rec_ram = estimate_ram(total_params, default_quant)
@@ -546,6 +619,7 @@ def scrape_model(repo_id: str) -> dict | None:
         "recommended_ram_gb": rec_ram,
         "min_vram_gb": min_vram,
         "quantization": default_quant,
+        "format": model_format,
         "context_length": context_length,
         "use_case": use_case_str,
         "capabilities": infer_capabilities(repo_id, pipeline_tag, use_case_str),
@@ -648,6 +722,10 @@ def enrich_gguf_sources(models: list[dict]) -> int:
 
     for i, model in enumerate(models, 1):
         repo_id = model["name"]
+
+        # Skip non-GGUF models (AWQ/GPTQ don't use GGUF sources)
+        if model.get("format", "gguf") != "gguf":
+            continue
 
         # Check cache first
         if repo_id in cache and _cache_entry_fresh(cache[repo_id]):

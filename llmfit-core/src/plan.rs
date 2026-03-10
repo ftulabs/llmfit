@@ -4,7 +4,7 @@ use crate::models::{LlmModel, quant_speed_multiplier};
 
 const SUPPORTED_QUANTS: &[&str] = &[
     "F32", "F16", "BF16", "Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q4_0", "Q3_K_M", "Q2_K", "mlx-8bit",
-    "mlx-4bit",
+    "mlx-4bit", "AWQ-4bit", "AWQ-8bit", "GPTQ-Int4", "GPTQ-Int8",
 ];
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -101,6 +101,21 @@ pub fn normalize_quant(quant: &str) -> Option<String> {
     }
     if trimmed.eq_ignore_ascii_case("mlx-8bit") {
         return Some("mlx-8bit".to_string());
+    }
+
+    // AWQ quantization formats
+    if trimmed.eq_ignore_ascii_case("awq-4bit") {
+        return Some("AWQ-4bit".to_string());
+    }
+    if trimmed.eq_ignore_ascii_case("awq-8bit") {
+        return Some("AWQ-8bit".to_string());
+    }
+    // GPTQ quantization formats
+    if trimmed.eq_ignore_ascii_case("gptq-int4") {
+        return Some("GPTQ-Int4".to_string());
+    }
+    if trimmed.eq_ignore_ascii_case("gptq-int8") {
+        return Some("GPTQ-Int8".to_string());
     }
 
     let upper = trimmed.to_uppercase();
@@ -702,6 +717,7 @@ mod tests {
             release_date: None,
             gguf_sources: vec![],
             capabilities: vec![],
+            format: crate::models::ModelFormat::default(),
         }
     }
 
@@ -748,5 +764,14 @@ mod tests {
         let models = vec![test_model()];
         let found = resolve_model_selector(&models, "qwen-test-7b").expect("exact match");
         assert_eq!(found.name, "Qwen-Test-7B");
+    }
+
+    #[test]
+    fn test_normalize_awq_gptq_quants() {
+        assert_eq!(normalize_quant("awq-4bit"), Some("AWQ-4bit".to_string()));
+        assert_eq!(normalize_quant("AWQ-4BIT"), Some("AWQ-4bit".to_string()));
+        assert_eq!(normalize_quant("awq-8bit"), Some("AWQ-8bit".to_string()));
+        assert_eq!(normalize_quant("gptq-int4"), Some("GPTQ-Int4".to_string()));
+        assert_eq!(normalize_quant("GPTQ-INT8"), Some("GPTQ-Int8".to_string()));
     }
 }
