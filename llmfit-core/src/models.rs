@@ -245,6 +245,12 @@ pub struct LlmModel {
     /// Model weight format (gguf, awq, gptq, mlx, safetensors)
     #[serde(default)]
     pub format: ModelFormat,
+    /// Number of attention heads (for tensor-parallelism compatibility checks).
+    #[serde(default)]
+    pub num_attention_heads: Option<u32>,
+    /// Number of key-value heads for GQA (defaults to num_attention_heads if None).
+    #[serde(default)]
+    pub num_key_value_heads: Option<u32>,
 }
 
 /// A known GGUF download source for a model on HuggingFace.
@@ -269,6 +275,34 @@ impl LlmModel {
     /// that cannot be dynamically re-quantized.
     pub fn is_prequantized(&self) -> bool {
         self.format.is_prequantized()
+    }
+
+    /// Returns true if the model's attention/KV heads are evenly divisible
+    /// by `tp_size`, meaning it can be split across that many devices.
+    /// TP=1 always returns true.
+    pub fn supports_tp(&self, tp_size: u32) -> bool {
+        if tp_size <= 1 {
+            return true;
+        }
+        let (attn, kv) = self.infer_head_counts();
+        attn % tp_size == 0 && kv % tp_size == 0
+    }
+
+    /// Returns all valid TP degrees in [1..=8] for this model.
+    pub fn valid_tp_sizes(&self) -> Vec<u32> {
+        (1..=8).filter(|&tp| self.supports_tp(tp)).collect()
+    }
+
+    /// Infer attention and KV head counts from metadata or model name heuristics.
+    fn infer_head_counts(&self) -> (u32, u32) {
+        if let (Some(attn), Some(kv)) = (self.num_attention_heads, self.num_key_value_heads) {
+            return (attn, kv);
+        }
+        if let Some(attn) = self.num_attention_heads {
+            return (attn, attn);
+        }
+        // Heuristic: infer from model name
+        infer_heads_from_name(&self.name, self.params_b())
     }
 
     /// Bytes-per-parameter for the model's quantization level.
@@ -572,6 +606,8 @@ impl ModelDatabase {
                     gguf_sources: e.gguf_sources,
                     capabilities: e.capabilities,
                     format: e.format,
+                    num_attention_heads: None,
+                    num_key_value_heads: None,
                 };
                 model.capabilities = Capability::infer(&model);
                 model
@@ -630,6 +666,108 @@ impl ModelDatabase {
     }
 }
 
+/// Infer attention and KV head counts from the model name and parameter count.
+/// Used as a fallback when explicit head counts are not available in the model metadata.
+fn infer_heads_from_name(name: &str, params_b: f64) -> (u32, u32) {
+    let name_lower = name.to_lowercase();
+
+    // Qwen family
+    if name_lower.contains("qwen") {
+        if params_b > 100.0 {
+            return (128, 16);
+        } else if params_b > 50.0 {
+            return (64, 8);
+        } else if params_b > 25.0 {
+            return (40, 8);
+        } else if params_b > 10.0 {
+            return (40, 8);
+        } else if params_b > 5.0 {
+            return (32, 8);
+        } else {
+            return (16, 4);
+        }
+    }
+
+    // Llama family
+    if name_lower.contains("llama") {
+        if name_lower.contains("scout") || name_lower.contains("maverick") {
+            return (64, 8);
+        } else if params_b > 60.0 {
+            return (64, 8);
+        } else if params_b > 20.0 {
+            return (48, 8);
+        } else if params_b > 5.0 {
+            return (32, 8);
+        } else {
+            return (16, 8);
+        }
+    }
+
+    // DeepSeek family
+    if name_lower.contains("deepseek") {
+        if params_b > 200.0 {
+            return (128, 16);
+        } else if params_b > 50.0 {
+            return (64, 8);
+        } else if params_b > 25.0 {
+            return (40, 8);
+        } else if params_b > 10.0 {
+            return (40, 8);
+        } else {
+            return (32, 8);
+        }
+    }
+
+    // Mistral/Mixtral
+    if name_lower.contains("mistral") || name_lower.contains("mixtral") {
+        if params_b > 100.0 {
+            return (96, 8);
+        } else if params_b > 20.0 {
+            return (32, 8);
+        } else {
+            return (32, 8);
+        }
+    }
+
+    // Gemma
+    if name_lower.contains("gemma") {
+        if params_b > 20.0 {
+            return (32, 16);
+        } else if params_b > 5.0 {
+            return (16, 8);
+        } else {
+            return (8, 4);
+        }
+    }
+
+    // Phi
+    if name_lower.contains("phi") {
+        if params_b > 10.0 {
+            return (40, 10);
+        } else {
+            return (32, 8);
+        }
+    }
+
+    // MiniMax
+    if name_lower.contains("minimax") {
+        return (48, 8);
+    }
+
+    // Default: common pattern based on param count
+    if params_b > 100.0 {
+        (128, 16)
+    } else if params_b > 50.0 {
+        (64, 8)
+    } else if params_b > 20.0 {
+        (32, 8)
+    } else if params_b > 5.0 {
+        (32, 8)
+    } else {
+        (16, 4)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +807,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
 
         // Large budget should return mlx-8bit (best in MLX hierarchy)
@@ -740,6 +880,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         assert_eq!(model.params_b(), 7.0);
     }
@@ -765,6 +907,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         assert_eq!(model.params_b(), 13.0);
     }
@@ -790,6 +934,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         assert_eq!(model.params_b(), 0.5);
     }
@@ -815,6 +961,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
 
         let mem = model.estimate_memory_gb("Q4_K_M", 4096);
@@ -848,6 +996,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
 
         // Large budget should return best quant
@@ -887,6 +1037,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         assert!(dense_model.moe_active_vram_gb().is_none());
 
@@ -910,6 +1062,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         let vram = moe_model.moe_active_vram_gb();
         assert!(vram.is_some());
@@ -941,6 +1095,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         assert!(dense_model.moe_offloaded_ram_gb().is_none());
 
@@ -964,6 +1120,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         let offloaded = moe_model.moe_offloaded_ram_gb();
         assert!(offloaded.is_some());
@@ -997,6 +1155,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Coding);
     }
@@ -1022,6 +1182,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Embedding);
     }
@@ -1047,6 +1209,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Reasoning);
     }
@@ -1242,6 +1406,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.contains(&Capability::Vision));
@@ -1270,6 +1436,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.contains(&Capability::ToolUse));
@@ -1297,6 +1465,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.is_empty());
@@ -1323,6 +1493,8 @@ mod tests {
             gguf_sources: vec![],
             capabilities: vec![Capability::Vision],
             format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
         };
         let caps = Capability::infer(&model);
         // Should keep the explicit Vision and not duplicate it
@@ -1452,5 +1624,102 @@ mod tests {
             with_gguf,
             total
         );
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Tensor parallelism tests
+    // ────────────────────────────────────────────────────────────────────
+
+    fn tp_test_model(name: &str, params_b: f64, attn_heads: Option<u32>, kv_heads: Option<u32>) -> LlmModel {
+        LlmModel {
+            name: name.to_string(),
+            provider: "Test".to_string(),
+            parameter_count: format!("{:.0}B", params_b),
+            parameters_raw: Some((params_b * 1_000_000_000.0) as u64),
+            min_ram_gb: 4.0,
+            recommended_ram_gb: 8.0,
+            min_vram_gb: Some(4.0),
+            quantization: "Q4_K_M".to_string(),
+            context_length: 4096,
+            use_case: "General".to_string(),
+            is_moe: false,
+            num_experts: None,
+            active_experts: None,
+            active_parameters: None,
+            release_date: None,
+            gguf_sources: vec![],
+            capabilities: vec![],
+            format: ModelFormat::default(),
+            num_attention_heads: attn_heads,
+            num_key_value_heads: kv_heads,
+        }
+    }
+
+    #[test]
+    fn test_supports_tp_with_explicit_heads() {
+        let model = tp_test_model("Test-8B", 8.0, Some(32), Some(8));
+        assert!(model.supports_tp(1));
+        assert!(model.supports_tp(2));
+        assert!(model.supports_tp(4));
+        assert!(model.supports_tp(8));
+        assert!(!model.supports_tp(3)); // 32 % 3 != 0
+        assert!(!model.supports_tp(5));
+    }
+
+    #[test]
+    fn test_supports_tp_always_true_for_1() {
+        let model = tp_test_model("Tiny", 1.0, None, None);
+        assert!(model.supports_tp(1));
+    }
+
+    #[test]
+    fn test_valid_tp_sizes_32_8() {
+        let model = tp_test_model("Test", 8.0, Some(32), Some(8));
+        let sizes = model.valid_tp_sizes();
+        assert!(sizes.contains(&1));
+        assert!(sizes.contains(&2));
+        assert!(sizes.contains(&4));
+        assert!(sizes.contains(&8));
+        assert!(!sizes.contains(&3));
+    }
+
+    #[test]
+    fn test_valid_tp_sizes_48_heads() {
+        // 48 attn heads, 8 kv heads — TP must divide both
+        let model = tp_test_model("Llama-32B", 32.0, Some(48), Some(8));
+        assert!(model.supports_tp(2));  // 48%2==0, 8%2==0
+        assert!(!model.supports_tp(3)); // 48%3==0 but 8%3!=0
+        assert!(model.supports_tp(4));  // 48%4==0, 8%4==0
+        assert!(model.supports_tp(8));  // 48%8==0, 8%8==0
+    }
+
+    #[test]
+    fn test_infer_heads_from_name_qwen() {
+        let (attn, kv) = infer_heads_from_name("Qwen2.5-72B-Instruct", 72.0);
+        assert_eq!(attn, 64);
+        assert_eq!(kv, 8);
+    }
+
+    #[test]
+    fn test_infer_heads_from_name_llama() {
+        let (attn, kv) = infer_heads_from_name("Llama-3.1-8B", 8.0);
+        assert_eq!(attn, 32);
+        assert_eq!(kv, 8);
+    }
+
+    #[test]
+    fn test_infer_heads_from_name_deepseek() {
+        let (attn, kv) = infer_heads_from_name("DeepSeek-V3", 671.0);
+        assert_eq!(attn, 128);
+        assert_eq!(kv, 16);
+    }
+
+    #[test]
+    fn test_supports_tp_with_inferred_heads() {
+        // No explicit heads — should infer from name
+        let model = tp_test_model("Llama-3.1-70B", 70.0, None, None);
+        assert!(model.supports_tp(2));
+        assert!(model.supports_tp(4));
+        assert!(model.supports_tp(8));
     }
 }
