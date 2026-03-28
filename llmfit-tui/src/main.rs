@@ -11,6 +11,7 @@ use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
 
+use llmfit_core::cluster::{ClusterNode, ClusterSpec, Interconnect};
 use llmfit_core::fit::{ModelFit, SortColumn, backend_compatible};
 use llmfit_core::hardware::SystemSpecs;
 use llmfit_core::models::ModelDatabase;
@@ -605,6 +606,29 @@ AGENT USAGE:
         /// Port to listen on
         #[arg(long, default_value = "8787")]
         port: u16,
+    },
+
+    /// Evaluate which models fit across a cluster of machines
+    Cluster {
+        /// Node specification: [COUNTx]RAM[,GPU_SPEC,...] e.g. "64G,RTX4090-24G", "100x128G,2xA100-80G"
+        #[arg(long = "node", required = true, num_args = 1)]
+        nodes: Vec<String>,
+
+        /// Network interconnect: infiniband, 10g, 1g (default: 1g)
+        #[arg(long, default_value = "1g")]
+        interconnect: String,
+
+        /// Show only models that perfectly match recommended specs
+        #[arg(short, long)]
+        perfect: bool,
+
+        /// Limit number of results
+        #[arg(short = 'n', long)]
+        limit: Option<usize>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1590,6 +1614,73 @@ fn run_plan(
     Ok(())
 }
 
+fn run_cluster(
+    node_specs: Vec<String>,
+    interconnect_str: String,
+    perfect: bool,
+    limit: Option<usize>,
+    json: bool,
+) {
+    let interconnect = Interconnect::parse_label(&interconnect_str).unwrap_or_else(|| {
+        eprintln!(
+            "Warning: unknown interconnect '{}', defaulting to 1GbE. Options: infiniband, 10g, 1g",
+            interconnect_str
+        );
+        Interconnect::default()
+    });
+
+    let mut nodes = Vec::new();
+    let mut next_index = 0;
+    for (i, spec) in node_specs.iter().enumerate() {
+        match ClusterNode::parse(spec, next_index) {
+            Ok((parsed_nodes, count)) => {
+                next_index += count;
+                nodes.extend(parsed_nodes);
+            }
+            Err(e) => {
+                eprintln!("Error parsing node spec {}: {}", i, e);
+                eprintln!("Expected format: [COUNTx]RAM[,GPU_SPEC,...] e.g. \"64G,RTX4090-24G\" or \"100x128G,2xA100-80G\"");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if nodes.is_empty() {
+        eprintln!("Error: at least one --node is required");
+        std::process::exit(1);
+    }
+
+    let cluster = ClusterSpec::new(nodes, interconnect);
+    let db = ModelDatabase::new();
+
+    if !json {
+        cluster.display();
+    }
+
+    let mut fits: Vec<ModelFit> = db
+        .get_all_models()
+        .iter()
+        .map(|m| ModelFit::analyze_cluster(m, &cluster))
+        .collect();
+
+    if perfect {
+        fits.retain(|f| f.fit_level == llmfit_core::fit::FitLevel::Perfect);
+    }
+
+    fits = llmfit_core::fit::rank_models_by_fit(fits);
+
+    if let Some(n) = limit {
+        fits.truncate(n);
+    }
+
+    if json {
+        let aggregated = cluster.aggregate_specs();
+        display::display_json_fits(&aggregated, &fits);
+    } else {
+        display::display_model_fits(&fits);
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     let context_limit = resolve_context_limit(cli.max_context);
@@ -1763,6 +1854,16 @@ fn main() {
                     eprintln!("Error: {}", err);
                     std::process::exit(1);
                 }
+            }
+
+            Commands::Cluster {
+                nodes,
+                interconnect,
+                perfect,
+                limit,
+                json,
+            } => {
+                run_cluster(nodes, interconnect, perfect, limit, json);
             }
         }
         return;

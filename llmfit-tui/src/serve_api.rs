@@ -529,6 +529,7 @@ fn run_mode_code(run_mode: llmfit_core::fit::RunMode) -> &'static str {
         llmfit_core::fit::RunMode::MoeOffload => "moe_offload",
         llmfit_core::fit::RunMode::CpuOffload => "cpu_offload",
         llmfit_core::fit::RunMode::CpuOnly => "cpu_only",
+        llmfit_core::fit::RunMode::Distributed => "distributed",
     }
 }
 

@@ -77,6 +77,7 @@ pub enum RunMode {
     CpuOffload,     // Partial GPU offload, spills to system RAM -- mixed
     CpuOnly,        // Entirely in system RAM, no GPU -- slow
     TensorParallel, // Distributed via NCCL across cluster nodes
+    Distributed,    // Split across multiple nodes (cluster mode)
 }
 
 /// Multi-dimensional score components (0-100 each).
@@ -387,6 +388,70 @@ impl ModelFit {
         }
     }
 
+    /// Analyze a model against a cluster of machines.
+    ///
+    /// Uses the aggregated SystemSpecs from the cluster, then:
+    /// - Marks run mode as Distributed when model needs more VRAM than any
+    ///   single node provides (tensor parallel across nodes)
+    /// - Applies interconnect speed penalty
+    pub fn analyze_cluster(
+        model: &LlmModel,
+        cluster: &crate::cluster::ClusterSpec,
+    ) -> Self {
+        let aggregated = cluster.aggregate_specs();
+        let mut fit = Self::analyze(model, &aggregated);
+
+        let max_single_node_vram: f64 = cluster
+            .nodes
+            .iter()
+            .map(|n| n.total_vram_gb())
+            .fold(0.0_f64, f64::max);
+
+        let needs_distribution = fit.memory_required_gb > max_single_node_vram
+            && max_single_node_vram > 0.0
+            && fit.run_mode == RunMode::Gpu;
+
+        if needs_distribution {
+            fit.run_mode = RunMode::Distributed;
+            fit.notes.push(format!(
+                "Distributed: model split across {} nodes via tensor parallelism",
+                cluster.node_count()
+            ));
+            fit.notes.push(format!(
+                "Interconnect: {} (speed factor {:.0}%)",
+                cluster.interconnect.label(),
+                cluster.interconnect.speed_factor() * 100.0
+            ));
+
+            fit.estimated_tps *= cluster.interconnect.speed_factor();
+
+            let score_components = compute_scores(
+                model,
+                &fit.best_quant,
+                fit.use_case,
+                fit.estimated_tps,
+                fit.memory_required_gb,
+                fit.memory_available_gb,
+            );
+            fit.score_components = score_components;
+            fit.score = weighted_score(score_components, fit.use_case);
+
+            fit.fit_level = score_fit(
+                fit.memory_required_gb,
+                fit.memory_available_gb,
+                model.recommended_ram_gb,
+                fit.run_mode,
+            );
+        } else if cluster.node_count() > 1 {
+            fit.notes.push(format!(
+                "Fits on single node (largest has {:.1} GB VRAM)",
+                max_single_node_vram
+            ));
+        }
+
+        fit
+    }
+
     pub fn fit_emoji(&self) -> &str {
         match self.fit_level {
             FitLevel::Perfect => "🟢",
@@ -416,6 +481,7 @@ impl ModelFit {
             RunMode::MoeOffload => "MoE",
             RunMode::CpuOffload => "CPU+GPU",
             RunMode::CpuOnly => "CPU",
+            RunMode::Distributed => "Distrib",
         }
     }
 }
@@ -464,6 +530,16 @@ fn score_fit(
         RunMode::CpuOnly => {
             // CPU-only is always a compromise -- cap at Marginal
             FitLevel::Marginal
+        }
+        RunMode::Distributed => {
+            // Distributed across nodes -- can reach Perfect if enough total VRAM
+            if recommended <= mem_available {
+                FitLevel::Perfect
+            } else if mem_available >= mem_required * 1.2 {
+                FitLevel::Good
+            } else {
+                FitLevel::Marginal
+            }
         }
     }
 }
@@ -824,6 +900,7 @@ fn estimate_tps(
             RunMode::TensorParallel => 0.9,
             RunMode::MoeOffload => 0.8,
             RunMode::CpuOffload => 0.5,
+            RunMode::Distributed => 0.7,
             RunMode::CpuOnly => unreachable!(),
         };
 
@@ -863,6 +940,7 @@ fn estimate_tps(
         RunMode::MoeOffload => base *= 0.8,     // expert switching latency
         RunMode::CpuOffload => base *= 0.5,     // significant penalty
         RunMode::CpuOnly => base *= 0.3,        // worst case—override K to CPU
+        RunMode::Distributed => base *= 0.70,   // network overhead for distributed cluster
     }
 
     // CPU-only should use CPU K regardless of detected GPU
